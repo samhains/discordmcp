@@ -74,12 +74,14 @@ Parameters:
 - `server` (optional): Server name or ID (required if bot is in multiple servers)
 - `channel`: Channel name (e.g., "general") or ID
 - `message`: Message content to send
+- `mediaUrl` (optional): URL to an image or video to attach (the server downloads it temporarily and uploads as an attachment)
 
 Example:
 ```json
 {
   "channel": "general",
-  "message": "Hello from MCP!"
+  "message": "Hello from MCP!",
+  "mediaUrl": "https://example.com/cute-cat.jpg"
 }
 ```
 

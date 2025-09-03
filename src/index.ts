@@ -6,6 +6,9 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { Client, GatewayIntentBits, TextChannel } from 'discord.js';
+import fsp from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { z } from 'zod';
 
 // Load environment variables
@@ -96,6 +99,7 @@ const SendMessageSchema = z.object({
   server: z.string().optional().describe('Server name or ID (optional if bot is only in one server)'),
   channel: z.string().describe('Channel name (e.g., "general") or ID'),
   message: z.string(),
+  mediaUrl: z.string().url().optional().describe('Optional URL to an image or video to attach'),
 });
 
 const ReadMessagesSchema = z.object({
@@ -139,6 +143,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "string",
               description: "Message content to send",
             },
+            mediaUrl: {
+              type: "string",
+              description: "Optional URL to an image or video to attach",
+            },
           },
           required: ["channel", "message"],
         },
@@ -177,16 +185,63 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     switch (name) {
       case "send-message": {
-        const { channel: channelIdentifier, message } = SendMessageSchema.parse(args);
+        const { channel: channelIdentifier, message, mediaUrl } = SendMessageSchema.parse(args);
         const channel = await findChannel(channelIdentifier);
-        
-        const sent = await channel.send(message);
-        return {
-          content: [{
-            type: "text",
-            text: `Message sent successfully to #${channel.name} in ${channel.guild.name}. Message ID: ${sent.id}`,
-          }],
-        };
+
+        // Helper to download a remote file to a temp path
+        async function downloadToTemp(url: string): Promise<string> {
+          const res = await fetch(url);
+          if (!res.ok) {
+            throw new Error(`Failed to download media (status ${res.status})`);
+          }
+
+          // Determine filename and extension
+          const urlObj = new URL(url);
+          const baseName = path.basename(urlObj.pathname) || 'download';
+          const contentType = res.headers.get('content-type') || '';
+          const extFromUrl = path.extname(baseName);
+          let ext = extFromUrl;
+          if (!ext) {
+            if (contentType.includes('image/png')) ext = '.png';
+            else if (contentType.includes('image/jpeg')) ext = '.jpg';
+            else if (contentType.includes('image/gif')) ext = '.gif';
+            else if (contentType.includes('video/mp4')) ext = '.mp4';
+            else if (contentType.includes('video/webm')) ext = '.webm';
+            else if (contentType.includes('image/')) ext = '.img';
+            else if (contentType.includes('video/')) ext = '.vid';
+            else ext = '.bin';
+          }
+          const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'discord-upload-'));
+          const tmpPath = path.join(tmpDir, (extFromUrl ? baseName : `${baseName}${ext}`));
+
+          const ab = await res.arrayBuffer();
+          const buf = Buffer.from(ab);
+          await fsp.writeFile(tmpPath, buf);
+
+          return tmpPath;
+        }
+
+        let tmpPath: string | undefined;
+        try {
+          let sent;
+          if (mediaUrl) {
+            tmpPath = await downloadToTemp(mediaUrl);
+            sent = await channel.send({ content: message, files: [tmpPath] });
+          } else {
+            sent = await channel.send(message);
+          }
+          return {
+            content: [{
+              type: "text",
+              text: `Message sent successfully to #${channel.name} in ${channel.guild.name}. Message ID: ${sent.id}`,
+            }],
+          };
+        } finally {
+          if (tmpPath) {
+            try { await fsp.unlink(tmpPath); } catch {}
+            try { await fsp.rmdir(path.dirname(tmpPath)); } catch {}
+          }
+        }
       }
 
       case "read-messages": {
