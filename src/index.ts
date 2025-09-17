@@ -99,7 +99,13 @@ const SendMessageSchema = z.object({
   server: z.string().optional().describe('Server name or ID (optional if bot is only in one server)'),
   channel: z.string().describe('Channel name (e.g., "general") or ID'),
   message: z.string(),
-  mediaUrl: z.string().url().optional().describe('Optional URL to an image or video to attach'),
+  mediaUrl: z
+    .union([
+      z.string().url(),
+      z.array(z.string().url()).min(1),
+    ])
+    .optional()
+    .describe('Optional single URL or array of URLs to images/videos to attach'),
 });
 
 const ReadMessagesSchema = z.object({
@@ -144,8 +150,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: "Message content to send",
             },
             mediaUrl: {
-              type: "string",
-              description: "Optional URL to an image or video to attach",
+              description: "Optional single URL or array of URLs to images/videos to attach",
+              oneOf: [
+                { type: "string" },
+                {
+                  type: "array",
+                  items: { type: "string" },
+                  minItems: 1,
+                },
+              ],
             },
           },
           required: ["channel", "message"],
@@ -188,6 +201,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const { channel: channelIdentifier, message, mediaUrl } = SendMessageSchema.parse(args);
         const channel = await findChannel(channelIdentifier);
 
+        const mediaUrls = mediaUrl
+          ? (Array.isArray(mediaUrl) ? mediaUrl : [mediaUrl])
+          : [];
+        if (mediaUrls.length > 10) {
+          throw new Error('Discord only allows up to 10 attachments per message');
+        }
+
         // Helper to download a remote file to a temp path
         async function downloadToTemp(url: string): Promise<string> {
           const res = await fetch(url);
@@ -221,12 +241,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           return tmpPath;
         }
 
-        let tmpPath: string | undefined;
+        const tmpPaths: string[] = [];
+        const tmpDirs = new Set<string>();
         try {
           let sent;
-          if (mediaUrl) {
-            tmpPath = await downloadToTemp(mediaUrl);
-            sent = await channel.send({ content: message, files: [tmpPath] });
+          if (mediaUrls.length > 0) {
+            for (const url of mediaUrls) {
+              const tmpPath = await downloadToTemp(url);
+              tmpPaths.push(tmpPath);
+              tmpDirs.add(path.dirname(tmpPath));
+            }
+            sent = await channel.send({ content: message, files: tmpPaths });
           } else {
             sent = await channel.send(message);
           }
@@ -237,10 +262,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }],
           };
         } finally {
-          if (tmpPath) {
-            try { await fsp.unlink(tmpPath); } catch {}
-            try { await fsp.rmdir(path.dirname(tmpPath)); } catch {}
-          }
+          await Promise.all(
+            tmpPaths.map(async (tmpPath) => {
+              try {
+                await fsp.unlink(tmpPath);
+              } catch {}
+            })
+          );
+          await Promise.all(
+            Array.from(tmpDirs).map(async (dir) => {
+              try {
+                await fsp.rmdir(dir);
+              } catch {}
+            })
+          );
         }
       }
 
